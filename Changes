@@ -1,0 +1,5 @@
+Revision history for Perl extension Tie::Persistent.
+
+0.9  Thu Jun 10 16:08:14 MET DST 1999
+	- first release; beta status; tie @array not yet tested.
+
