@@ -1,9 +1,21 @@
-# -*-perl-*-
+# -*-cperl-*-
+
+use strict;
+
+package Tie::Persistent;
+
+use vars qw($VERSION);
+$VERSION = '1.00';
+
 ######################################################################
 
 =head1 NAME
 
-Tie::Persistent  - persistent data structures via tie
+Tie::Persistent - persistent data structures via tie made easy
+
+=head1 VERSION
+
+1.00
 
 =head1 SYNOPSIS
 
@@ -11,19 +23,25 @@ Tie::Persistent  - persistent data structures via tie
 
  tie %DB, 'Tie::Persistent', 'file', 'rw'; # read data from 'file'
 
- # now create/add/modify database
- ...
+ (tied %DB)->autosync(1);       # turn on write back on every modify
+
+ # now create/add/modify datastruct
+ $DB{key} = "value";
+ (tied %DB)->sync();            # can be called manually
 
  untie %DB;			# stores data back into 'file'
 
+ # read stored data, no modification of file data
  tie %ReadOnly, 'Tie::Persistent', 'file';
  foreach (keys %ReadOnly) {
    print "$_ => $ReadOnly{$_}\n";
  }
+ untie %ReadOnly;		# modifications not stored back
+
 
 =head1 DESCRIPTION
 
-The Persistent package makes working with persistent data real
+The Tie::Persistent package makes working with persistent data real
 easy by using the C<tie> interface.
 
 It works by storing data contained in a variable into a file (not
@@ -31,6 +49,9 @@ unlike a database). The primary advantage is speed, as the whole
 datastructure is kept in memory (which is also a limitation), and, of
 course, that you can use arbitrary data structures inside the variable
 (unlike DB_File).
+
+Note that it is most useful if the data structure fits into memory.
+For larger data structures I recommend MLDBM.
 
 If you want to make an arbitrary object persistent, just store its
 ref in a scalar tied to 'Tie::Persistent'.
@@ -40,8 +61,15 @@ For example, it may not contain GLOB or CODE refs, as these are not
 really dumpable (yet?).
 
 Also, it works only for variables, you cannot use it for file handles.
-[A persistent file handle? Hmmm... Hmmm! Let me think about it.
-I have a vague idea, I'll have to do some unconscious work on...]
+
+[A persistent file handle? Hmmm... Hmmm! I've got an idea: I could
+start a server and send the file descriptor to it via ioctl(FD_SEND)
+or sendmsg.  Later, I could retrieve it back, so it's persistent as
+long as the server process keeps running.  But the whole file handle
+may contain more than just the file descriptor.  There may be
+an output routine associated with it that I'd somehow have to dump.
+Now let's see, there was some way to get the bytecode converted back
+into perl code... <wanders off into the darkness mumbling> ... ]
 
 =head1 PARAMETERS
 
@@ -56,8 +84,8 @@ C<tie> $Scalar, 'Tie::Persistent', B<file>, B<mode>, I<other...>;
 =item B<file>
 
 Filename to store the data in. No naming convention is enforced, but I
-personally use the suffix 'pdb' for "Perl Data Base" (or "Persistent Data
-Base"?). No file locking is done; see the section on locking below.
+personally use the suffix 'pd' for "Perl Data" (or "Persistent
+Data"?). No file locking is done; see the section on locking below.
 
 
 =item B<mode> (optional)
@@ -91,8 +119,8 @@ The default backup filenames follow the Emacs notation, i.e. a '~' is
 appended; for numbered backup files (specified as 'a' or '+'), an
 additional number and a '~' is appended.
 
-For a file 'data.pdb', the normal backup file would be 'data.pdb~' and
-the numbered backup files would be 'data.pdb~1~', 'data.pdb~2~' and so
+For a file 'data.pd', the normal backup file would be 'data.pd~' and
+the numbered backup files would be 'data.pd~1~', 'data.pd~2~' and so
 on. The latest backup file is the one with the highest number. The
 backup filename format can be overridden, see below.
 
@@ -126,16 +154,85 @@ Please report success or failure.
 
 =back
 
+
 =head1 LOCKING
 
 The data file is not automatically locked. Locking has to be done
 outside of the package. I recommend using a module like
 'Lockfile::Simple' for that.
 
-
 There are typical two scenarios for locking: you either lock just the
 'tie' and/or 'untie' calls, but not the data manipulation, or you lock
 the whole 'tie' - modify data - 'untie' sequence.
+
+
+=head1 KEEPING DATA SYCHRONIZED
+
+It often is useful to store snapshots of the tied data struct back to
+the file, e.g. to safeguard against program crashes.  You have two
+possibilities to do that:
+
+=over 4
+
+=item *
+
+use sync() to do it manually or
+
+=item *
+
+set autosync() to do it on every modification.
+
+=back
+
+Note that sync() and autosync() are methods of the tied object, so you
+have to call them like this:
+
+ (tied %hash)->sync();
+
+and
+
+ (tied @array)->autosync(1);  # or '0' to turn off autosync
+
+There is a global variable $Autosync (see there) that you can set to
+change the behaviour on a global level for all subsequent ties.
+
+Enabling autosync of course means a quite hefty performance penalty,
+so think carefully if and how you need it.  Maybe there are natural
+synchronisation points in your application where a manual sync is good
+enough.  Alternatively use MLDBM (if your top-level struct is a hash).
+
+Note: autosync only works if the top-level element of the data
+structure is modified.  If you have more complex data structures and
+modify elements somewhere deep down, you have to synchronize manually.
+I therefore recommend the following approach, especially if the
+topmost structure is a hash:
+
+=over 4
+
+=item *
+
+fetch the top-level element into a temporary variable
+
+=item *
+
+modify the datastructure
+
+=item *
+
+store back the top-level element, thus triggering a sync.
+
+=back
+
+E.g.
+
+  my $ref = $Hash{$key};      # fetch substructure
+  $ref->{$subkey} = $newval;  # modify somewhere down under
+  $Hash{$key} = $ref;         # store back
+
+This programming style has the added advantage that you can switch
+over to other database packages (for example the MLDBM package, in
+case your data structures outgrow your memory) quite easily by just
+changing the 'tie' line!
 
 
 =head1 CONFIGURATION VARIABLES
@@ -146,6 +243,8 @@ is faster (and the default), 'true' means to use 'Data::Dumper', which
 is slower but much more readable and thus meant for debugging.  This
 only influences the way the datastructure is I<written>, format detection
 on read is automatic.
+
+B<C<$Tie::Persistent::Autosync>> gives the default for all tied vars, so modifying it affects all subsequent ties.  It's set to 'false' by default.
 
 B<C<$Tie::Persistent::BackupFile>> points to a sub that determines the
 backup filename format. It gets the filename as $_[0] and returns the
@@ -171,60 +270,92 @@ which is the extended Emacs backup format.
 
 =head1 NOTES
 
-There is a module called 'Class::Eroot' that intends to do the same
-thing but uses a more difficult interface (and also is rather old, not
-that this is a bad thing per se), so I think my module could be of
-some use.
+=over 4
+
+=item *
 
 'Tie::Persistent' uses 'Storable' and 'Data::Dumper' internally, so
-these must be installed.
+these must be installed (the CPAN module will do this for you
+automatically).  Actually, 'Storable' is optional but recommended for
+speed.
+
+=item *
 
 For testing, I use 'Tie::IxHash', but 'make test' still does some
 tests if it is not installed.
 
+=item *
+
+There are two mailing lists at SourceForge.net:
+
+http://lists.sourceforge.net/mailman/listinfo/persistent-announce
+for announcements of new releases.
+
+http://lists.sourceforge.net/mailman/listinfo/persistent-discuss
+for user feedback and feature discussions.
+
+=item *
+
+The package is available through CPAN and SourceForge.net
+http://sourceforge.net/projects/persistent/
+
+=item *
+
+There is an initiative at SourceForge.net to get authors of
+persistence-packages of any kind to talk to one another.
+See http://sourceforge.net/projects/POOP/
+
+=back
+
 =head1 BUGS
 
-Numbered backupfile creation might have problems if the filename contains
-the first six digits of the speed of light (in m/s).
+Numbered backupfile creation might have problems if the filename (not
+the backup number) contains the first six digits of the speed of light
+(in m/s).
 
 All other bugs, please tell me!
 
-=head1 AUTHOR
+=head1 AUTHORS
 
-Roland Giersig <Roland.Giersig@bigfoot.com>
+Original version by Roland Giersig <RGiersig@cpan.org>
+
+Benjamin Liberman <beanjamman@yahoo.com> added autosyncing and fixed splice.
 
 =head1 COPYRIGHT
 
-Copyright (c) 1999 Roland Giersig. All rights reserved.  This program
-is free software; you can redistribute it and/or modify it under the
-same terms as Perl itself.
+Copyright (c) 1999-2002 Roland Giersig. All rights reserved.  This
+program is free software; you can redistribute it and/or modify it
+under the same terms as Perl itself.
 
 =head1 SEE ALSO
 
-L<Storable>, L<Data::Dumper>.
+L<Storable>, L<Data::Dumper>, L<MLDBM>.
 
 =cut
 
 ######################################################################
-
-use strict;
-
-package Tie::Persistent;
-
-use vars qw($VERSION);
-$VERSION = '0.901';
 
 use Carp;
 
 # we want to be portable
 use File::Basename;
 use File::Spec;
-use Sys::Hostname;
 
 # uses Storable for performance,
 # but Data::Dumper is more readable
 
-use Storable;
+my $Has_Storable;
+# we check if it's there, given that it's not in the core yet
+
+BEGIN {
+  eval { require Storable; };
+  $Has_Storable = (not $@);
+  if ($Has_Storable) {
+    import Storable;
+  } else {
+    warn "Suggestion: install Storable for better performance.\n" if $^W;
+  }
+}
 
 use Data::Dumper;
 $Data::Dumper::Terse  = 0;
@@ -233,10 +364,19 @@ $Data::Dumper::Purity = 1;
 
 # Configuration vars:
 
-use vars qw($Readable $BackupFile $NumberedBackupFile);
-$Readable = 0;			# set to 1 to use Data::Dumper
-$BackupFile = sub { "$_[0]~" };	# format of backup file
-$NumberedBackupFile = sub { "$_[0]~$_[1]~" }; # format of numbered backup file
+use vars qw($Autosync $Readable $BackupFile $NumberedBackupFile);
+
+# set to 1 to store new values back to disk after changes
+$Autosync = 0;
+
+# set to 1 to use Data::Dumper
+$Readable = 0;
+
+# format of backup file
+$BackupFile = sub { "$_[0]~" };
+
+# format of numbered backup file
+$NumberedBackupFile = sub { "$_[0]~$_[1]~" };
 
 #
 # all tie constructors delegate the work to the common '_new'
@@ -286,9 +426,11 @@ sub _new {
   my ($class, $type, $file, $mode, $other) = @_;
   my $self = [];
   bless $self => $class;
+  $mode = lc($mode);
   $self->[1]  = $type;		# keep for easier DESTROY
   $self->[2]  = $file;		# must be given
   $self->[3]  = $mode || 'r';	# mode defaults to read-only
+  $self->[4]  = $Autosync;      # default to global
 
   croak "No filename specified"
     if not defined $file;
@@ -319,12 +461,12 @@ sub _new {
 	# nope, now try Data::Dumper...
 	open FILE, $file
 	  or croak "Cannot open file $file: $!";
-	my $l = <FILE>;
+	my $firstline = <FILE>;
 	close FILE;
 	# check filetype
 	croak "File $file is not a PersistentData file"
-	  if (substr($l, 0, 15) ne '$PersistentData');
-
+	  if (substr($firstline, 0, 15) ne '$PersistentData');
+	# let the perl parser do the work for us
 	do $file;
       }
       croak "Cannot load file $file: $@"
@@ -403,7 +545,8 @@ sub _new {
       if defined $tied;
 
     croak "Persistent data is not of type $type"
-      if ($dataref eq $datatype and $datatype ne $type);
+      if ($dataref eq $datatype and $datatype ne $type
+	  and "$type$datatype" ne "SCALARREF");
     if ($tied) {
       # the chained var is tied, so we have to cleverly copy
       # the underlying object back in; we don't have to make
@@ -427,7 +570,7 @@ sub _new {
     } else {
 
       croak "Cannot copy persistent data type $dataref into $type variable"
-	if ($dataref ne $type);
+	if ($dataref ne $type and "$type$dataref" ne "SCALARREF");
 
       # it's a regular var, so we copy the data the normal way...
       if ($type eq 'HASH') {
@@ -445,36 +588,37 @@ sub _new {
 }
 
 #
-# generic destructor; write back data on destroy;
+# generic sync/destructor; write back data on destroy (or modify);
 # gets imported to the subpackages.
 #
-sub DESTROY {
+sub sync {
   my $self = shift;
   my $type = $self->[1];
   my $file = $self->[2];
   my $mode = $self->[3];
 
   # only overwrite if mode says so
-  if ($mode =~ m/[aw+]/) {
-    # is this portable? couldn't find a suitable File::Tmpfile or something...
-    my $tmpfile = "$file." . hostname . ".$$.tmp";
+  return if not ($mode =~ m/[aw+]/);
 
-    # switch over variable type
-    my $tied;
-    if ($type eq 'HASH') {
+  # is this portable? couldn't find a suitable File::Tmpfile or something...
+  my $tmpfile = "$file." . time . ".$$.tmp";
+
+  # switch over variable type
+  my $tied;
+  if ($type eq 'HASH') {
       $tied = tied %{$self->[0]};
-    } elsif ($type eq 'ARRAY') {
+  } elsif ($type eq 'ARRAY') {
       $tied = tied @{$self->[0]};
-    } elsif ($type eq 'SCALAR') {
+  } elsif ($type eq 'SCALAR') {
       $tied = tied ${$self->[0]};
-    } else {
+  } else {
       confess "Don't know how to handle $type";
-    }
+  }
 
-    if ($Readable) {
+  if ($Readable or not $Has_Storable) {
       # Data::Dumper is more readable...
       open DB, ">$tmpfile"
-	or warn ("Tie::Persistent::DESTROY: ",
+	or warn ("Tie::Persistent::sync: ",
 		 "cannot open $tmpfile for writing, DATA NOT STORED: $!\n"),
 		   return;
       if ($tied) {
@@ -485,7 +629,7 @@ sub DESTROY {
 	print DB Data::Dumper->Dump([$self->[0]], [qw(PersistentData)]);
       }
       close DB;
-    } else {
+  } else {
       # Storable is faster...
       if ($tied) {
 	# for tied vars, we must dump the underlying object...
@@ -494,10 +638,10 @@ sub DESTROY {
 	# regular vars just dump data...
 	Storable::nstore($self->[0], $tmpfile);
       }
-    }
+  }
 
-    # create backup files
-    if (-f $file) {
+  # create backup files
+  if (-f $file) {
       my $backup;
       if ($mode =~ m/[a+]/) {
 	# create numbered backup files
@@ -508,15 +652,22 @@ sub DESTROY {
       }
       if (defined $backup) {
 	rename $file, $backup
-	  or warn ("Tie::Persistent::DESTROY: ",
+	  or warn ("Tie::Persistent::sync: ",
 		   "cannot backup $file as $backup: $!\n");
       }
-    }
-
-    rename $tmpfile, $file
-      or warn ("Tie::Persistent::DESTROY: ",
-	       "cannot rename $tmpfile to $file: $!\n");
   }
+
+  rename $tmpfile, $file
+      or warn ("Tie::Persistent::sync: ",
+	       "cannot rename $tmpfile to $file: $!\n");
+}
+
+*DESTROY = \&sync;  # make an alias
+
+sub autosync {
+  my $val = $_[0]->[4];
+  $_[0]->[4] = $_[1] if @_ > 1;
+  return $val;
 }
 
 #
@@ -536,7 +687,7 @@ sub _find_next_backup_file($) {
   # now create a RE matching the backupfile format...
   my $nr = -1;
   my $re = quotemeta(&$NumberedBackupFile($basefile, 299792));
-  $re =~ s/299792/(\\d)/;
+  $re =~ s/299792/(\\d+)/;
 
   # find the highest backup number...
   foreach (readdir(DIR)) {
@@ -555,53 +706,86 @@ sub _find_next_backup_file($) {
 
 package Tie::Persistent::Hash;
 
-sub STORE    { $_[0]->[0]{$_[1]} = $_[2] }
+sub STORE    { $_[0]->[0]{$_[1]} = $_[2]; $_[0]->sync() if $_[0]->[4]; }
 sub FETCH    { $_[0]->[0]{$_[1]} }
 sub FIRSTKEY { my $a = scalar keys %{$_[0]->[0]}; each %{$_[0]->[0]} }
 sub NEXTKEY  { each %{$_[0]->[0]} }
 sub EXISTS   { exists $_[0]->[0]->{$_[1]} }
-sub DELETE   { delete $_[0]->[0]->{$_[1]} }
-sub CLEAR    { %{$_[0]->[0]} = () }
-*DESTROY = \&Tie::Persistent::DESTROY; # import generic DESTROY
+sub DELETE   { delete $_[0]->[0]->{$_[1]}; $_[0]->sync() if $_[0]->[4]; }
+sub CLEAR    { %{$_[0]->[0]} = (); $_[0]->sync() if $_[0]->[4]; }
+
+*sync     = \&Tie::Persistent::sync;     # import generic
+*autosync = \&Tie::Persistent::autosync; # import generic
+*DESTROY  = \&Tie::Persistent::DESTROY;  # import generic
 
 
 package Tie::Persistent::Array;
 
-# I copied these from perl5.00502, but I have not tested them, as I
-# have no perl5.005 installed (yet).
-# Don't blame me if they don't work (but tell me!).
-
 sub FETCHSIZE { scalar @{$_[0]->[0]} }
+#is it necessary to sync on STORESIZE???
 sub STORESIZE { $#{$_[0]->[0]} = $_[1]-1 }
-sub STORE     { $_[0]->[0][$_[1]] = $_[2] }
+sub STORE     { $_[0]->[0][$_[1]] = $_[2]; $_[0]->sync() if $_[0]->[4]; }
 sub FETCH     { $_[0]->[0][$_[1]] }
-sub CLEAR     { @{$_[0]->[0]} = () }
-sub POP       { pop(@{$_[0]->[0]}) }
-sub PUSH      { my $o = shift->[0]; push(@$o,@_) }
-sub SHIFT     { shift(@{$_[0]->[0]}) }
-sub UNSHIFT   { my $o = shift->[0]; unshift(@$o,@_) }
+sub CLEAR     { @{$_[0]->[0]} = (); $_[0]->sync() if $_[0]->[4]; }
 sub EXTEND    { }
-*DESTROY = \&Tie::Persistent::DESTROY; # import generic DESTROY
 
-sub SPLICE
-{
- my $ob  = shift->[0];
- my $sz  = $ob->FETCHSIZE;
- my $off = @_ ? shift : 0;
- $off   += $sz if $off < 0;
- my $len = @_ ? shift : $sz-$off;
- return splice(@$ob,$off,$len,@_);
+sub POP {
+ my $elt = pop(@{$_[0]->[0]});
+ $_[0]->sync() if $_[0]->[4];
+ return $elt;
 }
+
+sub PUSH {
+ my $this = shift;
+ my $len = push(@{$this->[0]}, @_);
+ $this->sync() if $this->[4];
+ return $len;
+}
+
+sub SHIFT {
+ my $elt = shift(@{$_[0]->[0]});
+ $_[0]->sync() if $_[0]->[4];
+ return $elt;
+}
+
+sub UNSHIFT {
+ my $this = shift;
+ my $len = unshift(@{$this->[0]}, @_);
+ $this->sync() if $this->[4];
+ return $len;
+}
+
+sub SPLICE {
+ my $this = shift;
+ my $sz   = @{$this->[0]};
+ my $off  = @_ ? shift : 0;
+ $off    += $sz if $off < 0;
+ my $len  = @_ ? shift : $sz-$off;
+ if( defined wantarray ) {
+   my @discards = splice(@{$this->[0]}, $off, $len, @_);
+   $this->sync() if $this->[4];
+   return @discards;
+ } else {
+   my $last_discard = splice(@{$this->[0]}, $off, $len, @_);
+   $this->sync() if $this->[4];
+   return $last_discard;
+ }
+}
+
+*sync     = \&Tie::Persistent::sync;     # import generic
+*autosync = \&Tie::Persistent::autosync; # import generic
+*DESTROY  = \&Tie::Persistent::DESTROY;  # import generic
 
 
 package Tie::Persistent::Scalar;
 
-sub STORE    { ${$_[0]->[0]} = $_[1]; }
+sub STORE    { ${$_[0]->[0]} = $_[1]; $_[0]->sync() if $_[0]->[4]; }
 sub FETCH    { ${$_[0]->[0]}; }
 
-*DESTROY = \&Tie::Persistent::DESTROY; # import generic DESTROY
+*sync     = \&Tie::Persistent::sync;     # import generic
+*autosync = \&Tie::Persistent::autosync; # import generic
+*DESTROY  = \&Tie::Persistent::DESTROY;  # import generic
 
 1;
 
 __END__
-

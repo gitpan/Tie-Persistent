@@ -8,15 +8,15 @@ use vars qw(@list $pfile $ixpfile $have_ixhash);
 BEGIN {
   $| = 1;
   @list = qw/foo bar baz xxx otto susi hugo/;
-  $pfile = 'persistentfile.pdb';
-  $ixpfile = 'persistentixfile.pdb';
+  $pfile = 'persistentfile.pd';
+  $ixpfile = 'persistentixfile.pd';
   unlink $pfile, $ixpfile, $pfile.'~', $ixpfile.'~';
 
   # Tie::IxHash might not be installed, but we can do some tests anyway
   eval { require Tie::IxHash; };
   $have_ixhash = not $@;
 
-  my $total_tests = 14;
+  my $total_tests = 17;
   # adjust number of tests
   $total_tests -= 1 if $] < 5.005; # no tied arrays
   $total_tests -= 8 if not $have_ixhash;
@@ -70,7 +70,7 @@ foreach $Tie::Persistent::Readable (0..1) {
   }
 
   {
-    my %h;
+    my (%h, %h2);
     tie %h, 'Tie::Persistent', $pfile, 'rw';
 
     my $notok;
@@ -82,8 +82,48 @@ foreach $Tie::Persistent::Readable (0..1) {
 
     print $notok? 'not ok ': 'ok ', $n++, "\n";
 
-    $h{$list[0]} = '';		# now modify
+    $h{$list[0]} = 'XXX';		# now modify
 
+    # modification must not be in the file
+    tie %h2, 'Tie::Persistent', $pfile, 'r';
+    for (my $i = $#list; $i >= 0; $i--) {
+      next if ($h2{$i} eq $list[$i] and $h2{$list[$i]} eq $i);
+      $notok = 1;
+      last;
+    }
+    print $notok? 'not ok ': 'ok ', $n++, "\n";
+    untie %h2;
+
+    (tied %h)->sync();          # write back
+
+    tie %h2, 'Tie::Persistent', $pfile, 'r';
+    for (my $i = $#list; $i > 0; $i--) {
+      next if ($h2{$i} eq $list[$i] and $h2{$list[$i]} eq $i);
+      $notok = 1;
+      last;
+    }
+    $notok = 1 if $h2{$list[0]} ne 'XXX';
+    print $notok? 'not ok ': 'ok ', $n++, "\n";
+    untie %h2;
+
+    (tied %h)->autosync(1);     # enable auto write back
+
+    $h{$list[0]} = 'yyy';	# now modify again
+
+    # modification must now be in the file
+    tie %h2, 'Tie::Persistent', $pfile, 'r';
+    for (my $i = $#list; $i > 0; $i--) {
+      next if ($h2{$i} eq $list[$i] and $h2{$list[$i]} eq $i);
+      $notok = 1;
+      last;
+    }
+    $notok = 1 if $h2{$list[0]} ne 'yyy';
+    print $notok? 'not ok ': 'ok ', $n++, "\n";
+    untie %h2;
+
+    (tied %h)->autosync(0);     # disable auto write back
+
+    $h{$list[0]} = '';		# now modify again
     untie %h;			# must write back
   }
 
